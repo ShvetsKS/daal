@@ -630,7 +630,7 @@ Status PredictClassificationTask<algorithmFPType, cpu>::predictOneRowByAllTrees(
             _xBD.set(const_cast<NumericTable *>(_data), 0, 1);
         const algorithmFPType* x_ptr = hmgData != nullptr ? hmgData->getArray() : _xBD.get();
 
-        predictByTrees(0, nTreesTotal, hmgData->getArray(), probPtr, nTreesTotal);
+        predictByTrees(0, nTreesTotal, x_ptr, probPtr, nTreesTotal);
         if (_res)
         {
             resPtr[0] = algorithmFPType(getMaxClass(probPtr));
