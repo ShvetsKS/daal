@@ -36,8 +36,7 @@
 #include "service_error_handling.h"
 #include "service_arrays.h"
 #include "algorithms/decision_forest/decision_forest_classification_model.h"
-#include <iostream>
-#include <bitset>
+
 using namespace daal::internal;
 using namespace daal::services;
 using namespace daal::services::internal;
