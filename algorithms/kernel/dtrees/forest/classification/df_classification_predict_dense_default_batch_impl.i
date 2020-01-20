@@ -842,7 +842,7 @@ Status PredictClassificationTask<float, avx512>::predictOneRowByAllTrees(size_t 
                         pbob_ptr[iTree + i] = const_cast<double* >(_model->getProbas(iTree + i));
                     }
                 }
-            
+
                 size_t iBlock = 0;
                 for(; iBlock < nBlocksOfClasses; iBlock++)
                 {
@@ -888,7 +888,7 @@ Status PredictClassificationTask<float, avx512>::predictOneRowByAllTrees(size_t 
             prob_d[j]  *= inverseTreesCount;
             probPtr[j] = prob_d[j];
         }
-    
+
         if (_res)
         {
             resPtr[0] = float(getMaxClass(probPtr));
