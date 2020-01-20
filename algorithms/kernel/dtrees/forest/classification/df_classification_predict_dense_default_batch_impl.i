@@ -103,6 +103,7 @@ public:
 protected:
     void predictByTrees(size_t iFirstTree, size_t nTrees, const algorithmFPType * x, algorithmFPType * prob, size_t nTreesTotal);
     void predictByTreesWithoutConversion(size_t iFirstTree, size_t nTrees, const algorithmFPType * x, double * prob, size_t nTreesTotal);
+    void predictByTreesWithoutConversion(size_t iFirstTree, size_t nTrees, const algorithmFPType * x, size_t * res, size_t nTreesTotal);
     void predictByTree(const algorithmFPType * x, size_t sizeOfBlock, size_t nCols, const featureIndexType * tFI, const leftOrClassType * tLC,
                        const algorithmFPType * tFV, algorithmFPType * prob, size_t iTree);
     void predictByTreeCommon(const algorithmFPType * x, size_t sizeOfBlock, size_t nCols, const featureIndexType * tFI, const leftOrClassType * tLC,
@@ -180,6 +181,7 @@ protected:
     services::internal::TArray<int, cpu> _displaces;
     services::internal::TArray<double*, cpu> _probas;
     services::internal::TArray<double, cpu> _probas_d;
+    services::internal::TArray<ClassIndexType, cpu> _val;
     NumericTable* cachedData;
     size_t _sumTreeSize;
     size_t _averageTreeSize;
@@ -274,6 +276,25 @@ void PredictClassificationTask<algorithmFPType, cpu>::predictByTreesWithoutConve
         }
     }
 }
+
+template <typename algorithmFPType, CpuType cpu>
+void PredictClassificationTask<algorithmFPType, cpu>::predictByTreesWithoutConversion(size_t iFirstTree, size_t nTrees, const algorithmFPType * x,
+                                                                     size_t * res, size_t nTreesTotal)
+{
+    const size_t iLastTree            = iFirstTree + nTrees;
+    for (size_t iTree = iFirstTree; iTree < iLastTree; ++iTree)
+    {
+        const dtrees::internal::DecisionTreeNode * pNode =
+            dtrees::prediction::internal::findNode<algorithmFPType, TreeType, cpu>(*_aTree[iTree], _featHelper, x);
+        DAAL_ASSERT(pNode);
+        const dtrees::internal::DecisionTreeNode * top = (const DecisionTreeNode *)(*_aTree[iTree]).getArray();
+        size_t idx                                     = pNode - top;
+
+        res[pNode->leftIndexOrClass]++;
+
+    }
+}
+
 
 template <typename algorithmFPType, CpuType cpu>
 void PredictClassificationTask<algorithmFPType, cpu>::parallelPredict(const algorithmFPType * aX, const DecisionTreeNode * aNode, size_t treeSize,
@@ -649,6 +670,7 @@ Status PredictClassificationTask<float, avx512>::predictOneRowByAllTrees(size_t 
     {
         //std::cout << "\n--------avx512\n";
         _probas_d.reset(_nClasses);
+        _val.reset(_nClasses);
         _cachedNClasses = _nClasses;
     }
 
@@ -673,7 +695,7 @@ Status PredictClassificationTask<float, avx512>::predictOneRowByAllTrees(size_t 
 
     float * resPtr = nullptr;
     float * probPtr = nullptr;
-
+    ClassIndexType* valPtr = nullptr;
     HomogenNumericTable<float> * resNT  = dynamic_cast<HomogenNumericTable<float> *>(_res);
     HomogenNumericTable<float> * probNT = dynamic_cast<HomogenNumericTable<float> *>(_prob);
 
@@ -703,249 +725,162 @@ Status PredictClassificationTask<float, avx512>::predictOneRowByAllTrees(size_t 
     const size_t nCols(_data->getNumberOfColumns());
     Status status;
 
-    if (probPtr != nullptr)
+    if(_prob != nullptr)
     {
-
-
-services::internal::service_memset<float, avx512>(probPtr, float(0), _nClasses);
-
-//(const_cast<NumericTable *>(_data), 0, 1);
-const HomogenNumericTable<float> * hmgData               = dynamic_cast<const HomogenNumericTable<float> *>(_data);
-if(hmgData == nullptr)
-    _xBD.set(const_cast<NumericTable *>(_data), 0, 1);
-
-const float* x_ptr = hmgData != nullptr ? hmgData->getArray() : _xBD.get();
-
-    __m512d prob_pd = _mm512_set1_pd(0);
-    __m512d zero_pd = _mm512_set1_pd(0);
-
-const size_t nVectorBlocks = nTreesTotal/16;
-//const size_t tailSize = nTreesInBlock % 16;
-size_t iTree = 0;
-featureIndexType * fi = _tFI.get();
-leftOrClassType * lc  = _tLC.get();
-float * fv  = _tFV.get();
-int* disp = _displaces.get();
-
-const size_t nBlocksOfClasses = _nClasses / 8;
-const size_t tailSize = _nClasses % 8;
-__mmask8 tail_mask = 0xff >> (8 - tailSize);// if _nClasses == 5 -> tmp_mask is 00011111
-//std::cout  << "\ntmp_mask:" << (int)tmp_mask;
-double* prob_d = _probas_d.get();
-services::internal::service_memset<double, avx512>(prob_d, double(0), _nClasses);
-
-for(; iTree < nVectorBlocks*16; iTree+=16)
-{
-    //size_t sumTreeSize = 0;
-//    std::cout << "\ntreeSezes:\n";
-    //for(size_t i = 0; i < 16; i++)
-    //{
-    //    treeSezes[i] = _aTree[iTree + i]->getNumberOfRows();
-    //    //sumTreeSize += treeSezes[i];
-//  //      std::cout <<  treeSezes[i] << "   ";
-    //}
-//    std::cout << "\n";
-    //printf("###sumTreeSize:%d\n", (int)sumTreeSize);
-//    std::cout << "###sumTreeSize:" << sumTreeSize << "\n";
-
-    //services::internal::TArray<featureIndexType, avx512> tFI(sumTreeSize);
-    //services::internal::TArray<leftOrClassType, avx512> tLC(sumTreeSize);
-    //services::internal::TArray<float, avx512> tFV(sumTreeSize);
-//printf("\nsumTreeSize: %d", (int)sumTreeSize);
-    if(disp[iTree] == -1)
-    {
-        //printf("\n########DISP = -1 ###########\n");
-        size_t displace = (iTree == 0) ? 0 : (disp[iTree - 1] + _aTree[iTree - 1]->getNumberOfRows());
-        for(size_t i = 0; i < 16; i++)
-        {
-            const size_t treeSize = _aTree[iTree + i]->getNumberOfRows();
-            const DecisionTreeNode * aNode = (const DecisionTreeNode *)(*_aTree[iTree + i]).getArray();
-            PRAGMA_IVDEP
-            PRAGMA_VECTOR_ALWAYS
-            for (size_t j = 0; j < treeSize; j++)
-            {
-                fi[displace + j] = aNode[j].featureIndex;
-                lc[displace + j] = aNode[j].leftIndexOrClass;
-                fv[displace + j] = (float)aNode[j].featureValueOrResponse;
-            }
-            disp[iTree + i] = displace;
-            displace += treeSize;
-        }
-    }
-//    std::cout << "###displace:" << displace << "\n";
-    __mmask16 isSplit = 1;
-    __m512i offset = _mm512_set_epi32(disp[iTree + 15], disp[iTree + 14], disp[iTree + 13], disp[iTree + 12], disp[iTree + 11], disp[iTree + 10], disp[iTree + 9], disp[iTree + 8], disp[iTree + 7], disp[iTree + 6], disp[iTree + 5], disp[iTree + 4], disp[iTree + 3], disp[iTree + 2], disp[iTree + 1], disp[iTree + 0]);
-
-    __m512i nOne   = _mm512_set1_epi32(-1);
-    __m512i zero   = _mm512_set1_epi32(0);
-    __m512 zero_ps = _mm512_set1_ps(0);
-    __m512 one_ps =  _mm512_set1_ps(1);
-    __m512 max_ps =  _mm512_set1_ps(-1);
-    __m512i one    = _mm512_set1_epi32(1);
-    __m512i idx =    _mm512_set_epi32(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0);
-    __mmask16 ones_mask = 0xffff;
-//printf("\nx_ptr:\n");
-//for(size_t i = 0; i < _data->getNumberOfColumns(); i++)
-//    std::cout << x_ptr[i] << "   ";
-//std::cout << std::endl;
-
-    while(isSplit)
-    {
-//printf("\n###inner iter\nf_i:\n");
-        //checkMask = 0;
-        __m512i offset_tmp = _mm512_add_epi32(offset, idx);
-        __m512i f_i = _mm512_mask_i32gather_epi32(zero, ones_mask, offset_tmp, fi, 4);
-//        int f_i_ptr[8] = {0,0,0,0,0,0,0,0};
-//        _mm256_store_epi32(f_i_ptr, f_i);
-//        for(size_t i = 0; i < 8; i++)
-//        {
-//            //printf("%d   ",f_i_ptr[i]);
-//            std::cout << f_i_ptr[i] << "   ";
-//        }
-//        printf("\nl_c\n");
-        isSplit = _mm512_cmp_epi32_mask(f_i, nOne, _MM_CMPINT_NE);
-        //printf("\nisSplit:%d\n",(int)isSplit);
-//        std::bitset<8> aaa( (char)isSplit );
-//        std::cout << "\n isSplit: " << aaa << "\n";
-//        float isSplit_ptr[8]  = {0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0};
-//        _mm256_store_ps(isSplit_ptr, _mm256_mask_add_ps(zero_ps, isSplit, one_ps, zero_ps));
-//        for(size_t i = 0; i < 8; i++)
-//        {
-//            //printf("%f   ",isSplit_ptr[i]);
-//            std::cout << isSplit_ptr[i] << "   ";
-//        }
-        __m512  x_v = _mm512_mask_i32gather_ps(zero_ps, isSplit, f_i, x_ptr, 4);
-//        float x_v_ptr[8]  = {0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0};
-//        _mm256_store_ps(x_v_ptr, x_v);
-//        for(size_t i = 0; i < 8; i++)
-//        {
-//            //printf("%f   ",x_v_ptr[i]);
-//            std::cout << x_v_ptr[i] << "   ";
-//        }
-//        printf("\nf_v\n");
-        __m512  f_v = _mm512_mask_i32gather_ps(zero_ps, ones_mask, offset_tmp, fv, 4);
-//        float f_v_ptr[8] = {0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0};
-//        _mm256_store_ps(f_v_ptr, f_v);
-//        for(size_t i = 0; i < 8; i++)
-//        {
-//            //printf("%f   ",f_v_ptr[i]);
-//            std::cout << f_v_ptr[i] << "   ";
-//        }
-//        printf("\nx_v\n");
-//        printf("\nres\n");
-        __mmask16 res = _mm512_cmp_ps_mask(x_v, f_v, _CMP_GT_OS);
-//        int res_ptr[8];
-//        _mm256_store_epi32(res_ptr, _mm256_mask_add_epi32(zero, res, one, zero));
-//        for(size_t i = 0; i < 8; i++)
-//        {
-//            //printf("%d   ",res_ptr[i]);
-//            std::cout << res_ptr[i] << "   ";
-//        }
-        __m512i l_c = _mm512_mask_i32gather_epi32(zero, ones_mask, offset_tmp, lc, 4);
-        //int f_i_ptr[8];
-//        _mm256_store_epi32(f_i_ptr, l_c);
-//        for(size_t i = 0; i < 8; i++)
-//        {
-//            //printf("%d   ",f_i_ptr[i]);
-//            std::cout << f_i_ptr[i] << "   ";
-//        }
-//        printf("\nidx\n");
-        idx = _mm512_mask_add_epi32(idx, isSplit, _mm512_mask_add_epi32(zero, res, one, zero), l_c);
-//        int idx_ptr[8];
-//        _mm256_store_epi32(idx_ptr, idx);
-//        for(size_t i = 0; i < 8; i++)
-//        {
-//            //printf("%d   ",idx_ptr[i]);
-//            std::cout << idx_ptr[i] << "   ";
-//        }
-//        printf("\n");
-        //checkMask = _kor_mask8(checkMask, isSplit);
-    }
-    //int idx_ptr_tmp[8] = {0,0,0,0,0,0,0,0};
-    int displaces[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-    _mm512_storeu_epi32(displaces,idx);//_mm512_mul_epi32(idx, _mm512_set_epi32(_nClasses,_nClasses,_nClasses,_nClasses,_nClasses,_nClasses,_nClasses,_nClasses,_nClasses,_nClasses,_nClasses,_nClasses,_nClasses,_nClasses,_nClasses,_nClasses)));
-//printf("\n~~~iter\n");
-    //__mmask16 tmp = ‭63488;
-    //std::bitset<32> aaa( (int)tmp );
-    //std::cout << "\n tmp: " << aaa << "\n";
-/*    for(size_t i = 0; i < 16; i++)
-    {
-        const double * probas = _model->getProbas(iTree + i);
-
-        if (probas != nullptr)
-        {
-            PRAGMA_IVDEP
-            PRAGMA_VECTOR_ALWAYS
-            for (size_t j = 0; j < _nClasses; ++j)
-            {
-                prob_d[j] += probas[displaces[i] * _nClasses + j];//*inverseTreesCount;
-            }
-        }
-
-    }*/
-
-double** pbob_ptr = _probas.get();
-
-if(nBlocksOfClasses == 0)
-{
-    if(pbob_ptr[iTree] == nullptr)
-    {
-        for(size_t i = 0; i < 16; i++)
-        {
-            pbob_ptr[iTree + i] = const_cast<double* >(_model->getProbas(iTree + i));
-            prob_pd = _mm512_add_pd(prob_pd, _mm512_mask_load_pd(zero_pd, tail_mask, pbob_ptr[iTree + i] + displaces[i]*_nClasses) );
-        }
+        services::internal::service_memset<float, avx512>(probPtr, float(0), _nClasses);
     }
     else
     {
-        for(size_t i = 0; i < 16; i++)
+        valPtr = _val.get();
+        services::internal::service_memset<ClassIndexType, avx512>(valPtr, (ClassIndexType)0, _nClasses);
+    }
+
+    const HomogenNumericTable<float> * hmgData               = dynamic_cast<const HomogenNumericTable<float> *>(_data);
+    if(hmgData == nullptr)
+        _xBD.set(const_cast<NumericTable *>(_data), 0, 1);
+
+    const float* x_ptr = hmgData != nullptr ? hmgData->getArray() : _xBD.get();
+
+        __m512d prob_pd = _mm512_set1_pd(0);
+        __m512d zero_pd = _mm512_set1_pd(0);
+
+    const size_t nVectorBlocks = nTreesTotal/16;
+
+    featureIndexType * fi = _tFI.get();
+    leftOrClassType * lc  = _tLC.get();
+    float * fv  = _tFV.get();
+    int* disp = _displaces.get();
+
+    const size_t nBlocksOfClasses = _nClasses / 8;
+    const size_t tailSize = _nClasses % 8;
+    __mmask8 tail_mask = 0xff >> (8 - tailSize);
+
+    double* prob_d = _probas_d.get();
+    services::internal::service_memset<double, avx512>(prob_d, double(0), _nClasses);
+
+    size_t iTree = 0;
+    for(; iTree < nVectorBlocks*16; iTree+=16)
+    {
+        if(disp[iTree] == -1)
         {
-            prob_pd = _mm512_add_pd(prob_pd, _mm512_mask_load_pd(zero_pd, tail_mask, pbob_ptr[iTree + i] + displaces[i]*_nClasses) );
+            size_t displace = (iTree == 0) ? 0 : (disp[iTree - 1] + _aTree[iTree - 1]->getNumberOfRows());
+            for(size_t i = 0; i < 16; i++)
+            {
+                const size_t treeSize = _aTree[iTree + i]->getNumberOfRows();
+                const DecisionTreeNode * aNode = (const DecisionTreeNode *)(*_aTree[iTree + i]).getArray();
+                PRAGMA_IVDEP
+                PRAGMA_VECTOR_ALWAYS
+                for (size_t j = 0; j < treeSize; j++)
+                {
+                    fi[displace + j] = aNode[j].featureIndex;
+                    lc[displace + j] = aNode[j].leftIndexOrClass;
+                    fv[displace + j] = (float)aNode[j].featureValueOrResponse;
+                }
+                disp[iTree + i] = displace;
+                displace += treeSize;
+            }
+        }
+        __mmask16 isSplit = 1;
+        __m512i offset = _mm512_set_epi32(disp[iTree + 15], disp[iTree + 14], disp[iTree + 13], disp[iTree + 12], disp[iTree + 11], disp[iTree + 10], disp[iTree + 9], disp[iTree + 8], disp[iTree + 7], disp[iTree + 6], disp[iTree + 5], disp[iTree + 4], disp[iTree + 3], disp[iTree + 2], disp[iTree + 1], disp[iTree + 0]);
+
+        __m512i nOne   = _mm512_set1_epi32(-1);
+        __m512i zero   = _mm512_set1_epi32(0);
+        __m512 zero_ps = _mm512_set1_ps(0);
+        __m512 one_ps =  _mm512_set1_ps(1);
+        __m512 max_ps =  _mm512_set1_ps(-1);
+        __m512i one    = _mm512_set1_epi32(1);
+        __m512i idx =    _mm512_set_epi32(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0);
+        __mmask16 ones_mask = 0xffff;
+
+        while(isSplit)
+        {
+            __m512i offset_tmp = _mm512_add_epi32(offset, idx);
+            __m512i f_i = _mm512_mask_i32gather_epi32(zero, ones_mask, offset_tmp, fi, 4);
+
+            isSplit = _mm512_cmp_epi32_mask(f_i, nOne, _MM_CMPINT_NE);
+
+            __m512  x_v = _mm512_mask_i32gather_ps(zero_ps, isSplit, f_i, x_ptr, 4);
+
+            __m512  f_v = _mm512_mask_i32gather_ps(zero_ps, ones_mask, offset_tmp, fv, 4);
+
+            __mmask16 res = _mm512_cmp_ps_mask(x_v, f_v, _CMP_GT_OS);
+
+            __m512i l_c = _mm512_mask_i32gather_epi32(zero, ones_mask, offset_tmp, lc, 4);
+
+            idx = _mm512_mask_add_epi32(idx, isSplit, _mm512_mask_add_epi32(zero, res, one, zero), l_c);
+        }
+        int displaces[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+        _mm512_storeu_epi32(displaces,idx);
+
+        double** pbob_ptr = _probas.get();
+
+        if(probPtr != nullptr)
+        {
+            if(nBlocksOfClasses == 0)
+            {
+                if(pbob_ptr[iTree] == nullptr)
+                {
+                    for(size_t i = 0; i < 16; i++)
+                    {
+                        pbob_ptr[iTree + i] = const_cast<double* >(_model->getProbas(iTree + i));
+                        prob_pd = _mm512_add_pd(prob_pd, _mm512_mask_load_pd(zero_pd, tail_mask, pbob_ptr[iTree + i] + displaces[i]*_nClasses) );
+                    }
+                }
+                else
+                {
+                    for(size_t i = 0; i < 16; i++)
+                    {
+                        prob_pd = _mm512_add_pd(prob_pd, _mm512_mask_load_pd(zero_pd, tail_mask, pbob_ptr[iTree + i] + displaces[i]*_nClasses) );
+                    }
+                }
+            }
+            else
+            {
+                if(pbob_ptr[iTree] == nullptr)
+                {
+                    for(size_t i = 0; i < 16; i++)
+                    {
+                        pbob_ptr[iTree + i] = const_cast<double* >(_model->getProbas(iTree + i));
+                    }
+                }
+            
+                size_t iBlock = 0;
+                for(; iBlock < nBlocksOfClasses; iBlock++)
+                {
+                    for(size_t i = 0; i < 16; i++)
+                    {
+                        prob_pd = _mm512_add_pd(prob_pd, _mm512_load_pd(pbob_ptr[iTree + i] + displaces[i]*_nClasses + iBlock*8) );
+                    }
+                    _mm512_store_pd(prob_d + iBlock*8, _mm512_add_pd(prob_pd, _mm512_load_pd(prob_d + iBlock*8) ));
+                    prob_pd = _mm512_set1_pd(0);
+                }
+                if(tailSize != 0)
+                {
+                    for(size_t i = 0; i < 16; i++)
+                        prob_pd = _mm512_add_pd(prob_pd, _mm512_mask_load_pd(zero_pd, tail_mask, pbob_ptr[iTree + i] + displaces[i]*_nClasses + iBlock*8) );
+                    _mm512_mask_store_pd(prob_d + iBlock*8,tail_mask, _mm512_add_pd(prob_pd, _mm512_load_pd(prob_d + iBlock*8) ));
+                    prob_pd = _mm512_set1_pd(0);
+                }
+            }
+        }
+        else
+        {
+            for(size_t i = 0; i < 16; i++)
+                valPtr[displaces[i]]++;
         }
     }
-}
-else
-{
-    if(pbob_ptr[iTree] == nullptr)
+
+    if(probPtr != nullptr)
     {
-        for(size_t i = 0; i < 16; i++)
+        if(nBlocksOfClasses == 0)
         {
-                pbob_ptr[iTree + i] = const_cast<double* >(_model->getProbas(iTree + i));
+            _mm512_mask_store_pd(prob_d,tail_mask,prob_pd);
         }
-    }
-
-    size_t iBlock = 0;
-    for(; iBlock < nBlocksOfClasses; iBlock++)
-    {
-        for(size_t i = 0; i < 16; i++)
+        if(iTree != nTreesTotal)  //do inference on tailed trees
         {
-            prob_pd = _mm512_add_pd(prob_pd, _mm512_load_pd(pbob_ptr[iTree + i] + displaces[i]*_nClasses + iBlock*8) );
+            const size_t tailSize = nTreesTotal - iTree;
+            predictByTreesWithoutConversion(iTree, tailSize, x_ptr, prob_d, nTreesTotal);
         }
-        _mm512_store_pd(prob_d + iBlock*8, _mm512_add_pd(prob_pd, _mm512_load_pd(prob_d + iBlock*8) ));
-        prob_pd = _mm512_set1_pd(0);
-    }
-    if(tailSize != 0)
-    {
-        //prob_pd = _mm512_set1_pd(0);
-        for(size_t i = 0; i < 16; i++)
-            prob_pd = _mm512_add_pd(prob_pd, _mm512_mask_load_pd(zero_pd, tail_mask, pbob_ptr[iTree + i] + displaces[i]*_nClasses + iBlock*8) );
-        _mm512_mask_store_pd(prob_d + iBlock*8,tail_mask, _mm512_add_pd(prob_pd, _mm512_load_pd(prob_d + iBlock*8) ));
-        prob_pd = _mm512_set1_pd(0);
-    }
-}
-
-}
-
-
-if(nBlocksOfClasses == 0)
-{
-    _mm512_mask_store_pd(prob_d,tail_mask,prob_pd);
-}
-if(iTree != nTreesTotal)  //do inference on tailed trees
-{
-    const size_t tailSize = nTreesTotal - iTree;
-    predictByTreesWithoutConversion(iTree, tailSize, x_ptr, prob_d, nTreesTotal);
-}
         float inverseTreesCount = 1.0 / float(nTreesTotal);
         PRAGMA_IVDEP
         PRAGMA_VECTOR_ALWAYS
@@ -954,95 +889,23 @@ if(iTree != nTreesTotal)  //do inference on tailed trees
             prob_d[j]  *= inverseTreesCount;
             probPtr[j] = prob_d[j];
         }
-
-
-/*        //printf("\nthreaded\n");
-        daal::threader_for(dim.nDataBlocks, dim.nDataBlocks, [&](size_t iBlock) {
-            const size_t iStartRow      = iBlock * dim.nRowsInBlock;
-            const size_t nRowsToProcess = (iBlock == dim.nDataBlocks - 1) ? dim.nRowsTotal - iStartRow : dim.nRowsInBlock;
-            ReadRows<algorithmFPType, cpu> xBD(const_cast<NumericTable *>(_data), iStartRow, nRowsToProcess);
-            DAAL_CHECK_BLOCK_STATUS_THR(xBD);
-            algorithmFPType * res  = resBD.get() + iStartRow;
-            algorithmFPType * prob = probPtr + iStartRow * _nClasses;
-            daal::threader_for(nRowsToProcess, nRowsToProcess, [&](size_t iRow) {
-                predictByTrees(0, nTreesTotal, xBD.get() + iRow * nCols, prob + iRow * _nClasses, nTreesTotal);
-                if (_res)
-                {
-                    res[iRow] = algorithmFPType(getMaxClass(prob + iRow * _nClasses));
-                }
-            });
-        });
-*/
-
-/*            ReadRows<algorithmFPType, cpu> xBD(const_cast<NumericTable *>(_data), 0, 1);
-            const algorithmFPType* x_ptr =  xBD.get();
-            DAAL_CHECK_BLOCK_STATUS(xBD);
-            algorithmFPType * res  = resBD.get();
-            const auto nThreads = daal::threader_get_threads_number();
-            size_t nTreesInBlock = nTreesTotal / nThreads;
-            algorithmFPType * prob = probPtr;
-            const size_t tailTreesToUse = nTreesInBlock + (nTreesTotal - nTreesInBlock * nThreads);
-            TlsSum<algorithmFPType, cpu> tlsData(_nClasses);
-            daal::threader_for(nThreads, nThreads, [&](size_t iThread) {
-                size_t iFirstTree = iThread * nTreesInBlock;
-                size_t nTreesToUse = (iThread == nThreads - 1) ? tailTreesToUse : nTreesInBlock;
-                        predictByTrees(iFirstTree, nTreesToUse, x_ptr, tlsData.local(), nTreesTotal);
-            });
-            tlsData.reduceTo(prob, _nClasses);*/
-
-//for(size_t i = 0; i < _nClasses; i++)
-//    printf("%f   ", probPtr[i]);
-//printf("\n");
-/*            ReadRows<algorithmFPType, cpu> xBD(const_cast<NumericTable *>(_data), 0, 1);
-            const algorithmFPType* x_ptr =  xBD.get();
-            DAAL_CHECK_BLOCK_STATUS(xBD);
-            algorithmFPType * res  = resBD.get();
-            const auto nThreads = daal::threader_get_threads_number();
-            const size_t nTreesInBlock = 50;//nTreesTotal / nThreads;
-            const size_t nBlocks = nTreesTotal / nTreesInBlock;
-            const size_t nTreesInLastBlock = nTreesInBlock + (nTreesTotal - nBlocks*nTreesInBlock);
-            algorithmFPType * prob = probPtr;
-            TlsSum<algorithmFPType, cpu> tlsData(_nClasses);
-            daal::threader_for(nBlocks, nBlocks, [&](size_t iBlock) {
-                size_t iFirstTree = iBlock * nTreesInBlock;
-                size_t nTreesToUse = (iBlock == nBlocks - 1) ? nTreesInLastBlock : nTreesInBlock;
-                        predictByTrees(iFirstTree, nTreesToUse, x_ptr, tlsData.local(), nTreesTotal);
-            });
-            tlsData.reduceTo(prob, _nClasses);
-*/
-
-            if (_res)
-            {
-                resPtr[0] = float(getMaxClass(probPtr));
-            }
-/*int* displ = _displaces.get();
-for(size_t i = 0; i < nTreesTotal; i++)
-{
-    std::cout << displ[i] << "   ";
-}
-std::cout << "\n";*/
+    
+        if (_res)
+        {
+            resPtr[0] = float(getMaxClass(probPtr));
+        }
     }
     else
     {
-        const bool bUseTLS(_nClasses > s_cMaxClassesBufSize);
-        ClassesCounterTls lsData(_nClasses);
-        daal::threader_for(dim.nDataBlocks, dim.nDataBlocks, [&](size_t iBlock) {
-            const size_t iStartRow      = iBlock * dim.nRowsInBlock;
-            const size_t nRowsToProcess = (iBlock == dim.nDataBlocks - 1) ? dim.nRowsTotal - iStartRow : dim.nRowsInBlock;
-            ReadRows<float, avx512> xBD(const_cast<NumericTable *>(_data), iStartRow, nRowsToProcess);
-            //DAAL_CHECK_BLOCK_STATUS_THR(xBD);
-            float * res = resPtr + iStartRow;
-            daal::threader_for(nRowsToProcess, nRowsToProcess, [&](size_t iRow) {
-                float buf[s_cMaxClassesBufSize];
-                float * val = bUseTLS ? lsData.local() : buf;
-                for (size_t i = 0; i < _nClasses; ++i) val[i] = 0;
-                predictByTrees(0, nTreesTotal, xBD.get() + iRow * nCols, val, nTreesTotal);
-                if (_res)
-                {
-                    res[iRow] = float(getMaxClass(val));
-                }
-            });
-        });
+        if(iTree != nTreesTotal)  //do inference on tailed trees
+        {
+            const size_t tailSize = nTreesTotal - iTree;
+            predictByTreesWithoutConversion(iTree, tailSize, x_ptr, valPtr, nTreesTotal);
+        }
+        if (_res)
+        {
+            resPtr[0] = getMaxClass(valPtr);
+        }
     }
 
     return status;
