@@ -662,6 +662,7 @@ Status PredictClassificationTask<algorithmFPType, cpu>::predictOneRowByAllTrees(
     return safeStat.detach();
 }
 
+#if defined(__INTEL_COMPILER)
 template <>
 Status PredictClassificationTask<float, avx512>::predictOneRowByAllTrees(size_t nTreesTotal, const DimType & dim)
 {
@@ -910,7 +911,7 @@ Status PredictClassificationTask<float, avx512>::predictOneRowByAllTrees(size_t 
 
     return status;
 }
-
+#endif
 
 
 template <typename algorithmFPType, CpuType cpu>
