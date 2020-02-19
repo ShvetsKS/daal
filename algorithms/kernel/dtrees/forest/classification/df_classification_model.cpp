@@ -26,7 +26,7 @@
 #include "df_classification_model_impl.h"
 #include "collection.h"
 #include "dtrees_model_impl_common.h"
-
+#include <iostream>
 using namespace daal::data_management;
 using namespace daal::services;
 using namespace daal::algorithms::dtrees::internal;
@@ -305,9 +305,11 @@ services::Status ModelImpl::deserializeImpl(const data_management::OutputDataArc
 {
     auto s = daal::algorithms::classifier::Model::serialImpl<const data_management::OutputDataArchive, true>(arch);
     const int daalVersion = COMPUTE_DAAL_VERSION(arch->getMajorVersion(), arch->getMinorVersion(), arch->getUpdateVersion());
+    std::cout << "\ndaalVersion: " << daalVersion << std::endl;
     s.add(ImplType::serialImpl<const data_management::OutputDataArchive, true>(arch, daalVersion));
     if((daalVersion >= COMPUTE_DAAL_VERSION(2020, 0, 1)))
     {
+        std::cout << "\n_nFeatures was set!\n";
         arch->set(daal::algorithms::classifier::internal::ModelInternal::_nFeatures);
     }
 
